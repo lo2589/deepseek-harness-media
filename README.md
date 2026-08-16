@@ -25,7 +25,7 @@ The package was built, packed (`dsh-provider-quick-config-0.1.1.tgz`) and instal
 cd /path/to/deepseek-harness
 # pack the package (in dsh-provider-quick-config/): npm pack
 node --import tsx/esm apps/cli/src/bin.ts plugin --profile web add \
-  file:/…/dsh-provider-quick-config/dsh-provider-quick-config-0.1.1.tgz
+  file:/path/to/dsh-provider-quick-config/dsh-provider-quick-config-0.1.1.tgz
 cd ~/.dsh/profiles/web && pnpm install   # only needed when the tarball path changed
 ```
 
