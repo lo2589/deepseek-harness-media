@@ -12,3 +12,23 @@ BLOG.md
 
 # 截图默认保存目录（展示台多媒体库，本地保留）
 .screenshots/
+
+# 本地开发文档与草稿（本地保留，永不进仓）
+/DSH-PLUGIN-DEVELOPMENT.md
+/README.zh.md
+/BLOG_CNBLOGS.md
+/ad-text.md
+
+# 本地开发/调试工具（本地保留，永不进仓）
+/.codedendrite/
+/.codedendrite_ignore
+/.code_genome_db.json
+/.code_genome_db.json.lock
+/.code_hash_db.json
+/.code_hash_db.json.lock
+/apply.sh
+/apply-and-watch.sh
+/tests/
+/package.json
+/package-lock.json
+/dsh-provider-quick-config/tools/
