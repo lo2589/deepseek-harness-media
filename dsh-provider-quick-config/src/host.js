@@ -13,7 +13,7 @@ module.exports = {
   // timer and webServer are declared here and the rest stay optional.
   // webServer 必须硬依赖：bundle 加载早于 webServer 服务，声明后 Cordis 会等
   // webServer 出现再 apply，媒体展示台的路由才能注册成功。
-  inject: ['timer', 'webServer'],
+  inject: ['timer', 'webServer', 'connection'],
   apply(ctx) {
     const NS = 'llm-pi-ai'
     // Resolved per call, not captured at apply: a service that mounts after
@@ -552,9 +552,23 @@ module.exports = {
     }
     function attachMediaRoutes() {
       const server = ctx.get('webServer')
-      if (server === undefined || typeof server.register !== 'function') return
+      const connection = ctx.get('connection')
+      if (server === undefined || typeof server.register !== 'function'
+        || connection === undefined || typeof connection.requestRejection !== 'function') return
+      const register = (route) => register({
+        ...route,
+        handler: async (req, res) => {
+          const rejection = connection.requestRejection(req)
+          if (rejection !== undefined) {
+            res.writeHead(rejection)
+            res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+            return
+          }
+          return route.handler(req, res)
+        },
+      })
       // 列表接口：实时扫描 ?session=<id>
-      const listDisposer = server.register({
+      const listDisposer = register({
         kind: 'exact',
         path: '/plugins/provider-quick-config/media-list',
         handler: async (req, res) => {
@@ -575,45 +589,51 @@ module.exports = {
           }
         },
       })
-      // 文件接口：?p=<绝对路径>（扩展名白名单 + fs 校验，防任意读）
-      const fileDisposer = server.register({
+      // 文件接口：?session=<id>&p=<path>。只返回该会话工作目录内经 DSH fs 服务解析的文件。
+      const fileDisposer = register({
         kind: 'exact',
         path: '/plugins/provider-quick-config/media',
         handler: async (req, res) => {
           const q = queryOf(req.url)
+          const sid = q.session || ''
           const p = q.p || ''
           const lower = p.toLowerCase()
           const lastDot = lower.lastIndexOf('.')
           const ext = lastDot >= 0 ? lower.slice(lastDot) : ''
           const mime = MEDIA_EXT[ext]
-          if (mime === undefined || p === '') {
+          if (sid === '' || p === '' || mime === undefined) {
             res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
             res.end('unsupported')
             return
           }
           try {
-            // 路径/大小解析：首选 fs 服务（走 sandbox），失败/拒绝访问时用 node:fs 兜底。
-            // 兜底场景：fs 服务对 .screenshots/ 等隐藏目录拒绝 readBytes → 列出但读不出。
-            let size = 0
-            let nodeFs
-            try { nodeFs = require('node:fs') } catch (e) { nodeFs = undefined }
-            const fsSvc = fsOf()
-            try {
-              if (fsSvc !== undefined) {
-                const target = await fsSvc.resolve(p)
-                const info = await fsSvc.stat(target)
-                if (info !== undefined && info.type === 'file') {
-                  size = info.size
-                }
-              }
-            } catch (e) { /* fall through to node:fs stat */ }
-            if (size === 0 && nodeFs !== undefined) {
-              try {
-                const st = nodeFs.statSync(p)
-                if (st.isFile() && st.size > 0) size = st.size
-              } catch (e) { /* path truly inaccessible */ }
+            const sq = ctx.get('sessionQuery')
+            if (sq === undefined || typeof sq.readSession !== 'function') throw new Error('session service unavailable')
+            const snap = await sq.readSession(sid)
+            const cwd = snap && snap.session && typeof snap.session.cwd === 'string' ? snap.session.cwd : ''
+            if (cwd === '') throw new Error('session cwd unavailable')
+            const nodePath = require('node:path')
+            const root = nodePath.resolve(cwd)
+            const candidate = nodePath.resolve(root, p)
+            const relative = nodePath.relative(root, candidate)
+            if (relative === '' || relative === '..' || relative.startsWith('..' + nodePath.sep) || nodePath.isAbsolute(relative)) {
+              res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+              res.end('outside-session-workspace')
+              return
             }
-            if (size === 0) throw new Error('not a file')
+            const fsSvc = fsOf()
+            if (fsSvc === undefined) throw new Error('DSH filesystem service unavailable')
+            const target = await fsSvc.resolve(candidate)
+            const resolved = nodePath.resolve(String(target))
+            const targetRelative = nodePath.relative(root, resolved)
+            if (targetRelative === '' || targetRelative === '..' || targetRelative.startsWith('..' + nodePath.sep) || nodePath.isAbsolute(targetRelative)) {
+              res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+              res.end('outside-session-workspace')
+              return
+            }
+            const info = await fsSvc.stat(target)
+            if (info === undefined || info.type !== 'file' || typeof info.size !== 'number' || info.size < 0) throw new Error('not a file')
+            const size = info.size
             const cap = 200 * 1024 * 1024
             if (size > cap) {
               res.writeHead(413, { 'content-type': 'text/plain; charset=utf-8' })
@@ -626,50 +646,26 @@ module.exports = {
               'cache-control': 'private, max-age=60',
               'x-content-type-options': 'nosniff',
             }
-            // Range 支持：浏览器 <video>/<audio> 播放需要 206 Partial Content
-            const range = String(req.headers.range || '').match(/bytes=(\d*)-(\d*)/)
+            const bytes = await fsSvc.readBytes(target, undefined, cap)
+            const range = String(req.headers.range || '').match(/^bytes=(\d*)-(\d*)$/)
             if (range !== null) {
               const start = range[1] !== '' ? parseInt(range[1], 10) : 0
-              const end = range[2] !== '' ? parseInt(range[2], 10) : size - 1
-              if (!isFinite(start) || start < 0 || start >= size) {
+              const requestedEnd = range[2] !== '' ? parseInt(range[2], 10) : size - 1
+              if (!isFinite(start) || !isFinite(requestedEnd) || start < 0 || start >= size || requestedEnd < start) {
                 res.writeHead(416, Object.assign({}, baseHeaders, { 'content-range': 'bytes */' + size }))
                 res.end()
                 return
               }
-              const chunkEnd = Math.min(end, size - 1)
-              const length = chunkEnd - start + 1
+              const end = Math.min(requestedEnd, size - 1)
+              const slice = bytes.subarray(start, end + 1)
               res.writeHead(206, Object.assign({}, baseHeaders, {
-                'content-range': 'bytes ' + start + '-' + chunkEnd + '/' + size,
-                'content-length': String(length),
+                'content-range': 'bytes ' + start + '-' + end + '/' + size,
+                'content-length': String(slice.length),
               }))
-              // 读字节：复用外层解析过的 nodeFs（隐藏目录、sandbox 拒访时仍能读），否则走 fs 服务
-              if (nodeFs !== undefined) {
-                const nodePath = require('node:path')
-                const abs = nodePath.resolve(p)
-                const stream = nodeFs.createReadStream(abs, { start, end: chunkEnd })
-                stream.on('error', () => { res.destroy() })
-                stream.pipe(res)
-              } else if (fsSvc !== undefined) {
-                const target = await fsSvc.resolve(p)
-                const bytes = await fsSvc.readBytes(target, undefined, cap)
-                const slice = bytes.subarray(start, chunkEnd + 1)
-                res.end(slice)
-              } else {
-                throw new Error('no read backend')
-              }
+              res.end(slice)
               return
             }
-            // 无 Range：整文件
-            let bytes = null
-            if (nodeFs !== undefined) {
-              try { bytes = nodeFs.readFileSync(p) } catch (e) { bytes = null }
-            }
-            if (bytes === null && fsSvc !== undefined) {
-              const target = await fsSvc.resolve(p)
-              bytes = await fsSvc.readBytes(target, undefined, cap)
-            }
-            if (bytes === null) throw new Error('read failed')
-            res.writeHead(200, Object.assign({}, baseHeaders, { 'content-length': String(size) }))
+            res.writeHead(200, Object.assign({}, baseHeaders, { 'content-length': String(bytes.length) }))
             res.end(bytes)
           } catch (e) {
             if (!res.headersSent) {
@@ -683,7 +679,7 @@ module.exports = {
       })
       // 截图保存：POST ?session=<id>，body JSON { name, dataBase64 }
       // 写到 <会话cwd>/.screenshots/<name>，返回 { path }；目录不存在则创建
-      const shotDisposer = server.register({
+      const shotDisposer = register({
         kind: 'exact',
         path: '/plugins/provider-quick-config/save-screenshot',
         handler: async (req, res) => {
@@ -738,7 +734,7 @@ module.exports = {
       // 扩展名白名单 = MEDIA_EXT 的键集合，避免任意写入。
       const validExts = Object.keys(MEDIA_EXT).map(function (e) { return e.slice(1) }).join('|')
       const VALID_NAME_RE = new RegExp('^[\\w.\\u4e00-\\u9fa5\\- ]+\\.(?:' + validExts + ')$', 'i')
-      const uploadDisposer = server.register({
+      const uploadDisposer = register({
         kind: 'exact',
         path: '/plugins/provider-quick-config/save-media',
         handler: async (req, res) => {
@@ -797,7 +793,7 @@ module.exports = {
       // 屏幕录制权限等问题）。Linux/Windows 没有 screencapture，返回 503 让 client
       // 回退到 getDisplayMedia。
       // 可选 ?session=<id> 显式指定 session；不传则查找当前 active session。
-      const nativeShotDisposer = server.register({
+      const nativeShotDisposer = register({
         kind: 'exact',
         path: '/plugins/provider-quick-config/native-screenshot',
         handler: async (req, res) => {
@@ -938,7 +934,7 @@ module.exports = {
         },
       })
       // Reveal 文件路由：在系统文件管理器中高亮显示指定文件（macOS: open -R / Windows: explorer /select / Linux: xdg-open <dir>）
-      const revealDisposer = server.register({
+      const revealDisposer = register({
         kind: 'exact',
         path: '/plugins/provider-quick-config/reveal-file',
         handler: async (req, res) => {
