@@ -1,0 +1,43 @@
+{
+  "name": "dsh-provider-quick-config",
+  "version": "0.5.6",
+  "description": "DeepSeek Harness Web provider quick configuration, model discovery and media utilities.",
+  "license": "MIT",
+  "main": "./dsh-provider-quick-config/src/host.js",
+  "exports": {
+    ".": "./dsh-provider-quick-config/src/host.js",
+    "./client": "./dsh-provider-quick-config/src/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dsh-provider-quick-config/src",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "dsh-plugins",
+    "provider-switcher",
+    "multimodal",
+    "vision"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lo2589/deepseek-harness-media.git"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-api-remotes"
+      ]
+    }
+  }
+}

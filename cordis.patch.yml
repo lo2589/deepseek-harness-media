@@ -1,0 +1,5 @@
+# Root-level bundle entry for GitHub installs and DSH marketplace scanners.
+# The implementation lives under dsh-provider-quick-config/src.
+- insert:
+    - id: provider-quick-config
+      name: dsh-provider-quick-config
